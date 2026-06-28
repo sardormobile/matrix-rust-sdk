@@ -46,7 +46,9 @@ anyhow.workspace = true
 chrono.workspace = true
 extension-trait = "1.0.2"
 eyeball-im.workspace = true
+eyeball.workspace = true
 futures-util.workspace = true
+tokio-util.workspace = true
 language-tags = "0.3.2"
 log-panics = { version = "2.1.0", default-features = false, features = ["with-backtrace"] }
 matrix-sdk = { workspace = true, features = [
