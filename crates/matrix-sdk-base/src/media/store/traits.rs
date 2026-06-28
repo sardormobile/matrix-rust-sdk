@@ -187,6 +187,16 @@ pub trait MediaStore: AsyncTraitDeps {
 
     /// Returns the size of the store in bytes, if known.
     async fn get_size(&self) -> Result<Option<usize>, Self::Error>;
+    
+    /// Check whether media content for the given MXC URI is present in the
+    /// local media cache.
+    ///
+    /// This method only checks for existence and does not load the media
+    /// content into memory.
+    async fn has_media_content_for_uri(
+        &self,
+        uri: &MxcUri,
+    ) -> Result<bool, Self::Error>;
 }
 
 /// An abstract trait that can be used to implement different store backends
@@ -419,6 +429,11 @@ impl<T: MediaStore> MediaStore for EraseMediaStoreError<T> {
     async fn get_size(&self) -> Result<Option<usize>, Self::Error> {
         self.0.get_size().await.map_err(Into::into)
     }
+
+    async fn has_media_content_for_uri(&self, uri: &MxcUri) -> Result<bool, Self::Error> {
+        self.0.has_media_content_for_uri(uri).await.map_err(Into::into)
+    }
+    
 }
 
 /// A type-erased [`MediaStore`].

@@ -234,6 +234,13 @@ impl MediaStore for MemoryMediaStore {
     async fn reopen(&self) -> Result<(), Self::Error> {
         Ok(())
     }
+
+    /// Check whether media content for the given URI exists in the cache.
+    async fn has_media_content_for_uri(&self, uri: &MxcUri) -> std::result::Result<bool, Self::Error> {
+        let inner = self.inner.read().unwrap();
+
+        Ok(inner.media.iter().any(|media| media.uri == uri))
+    }
 }
 
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]

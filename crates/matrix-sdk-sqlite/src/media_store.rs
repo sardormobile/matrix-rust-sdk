@@ -473,6 +473,26 @@ impl MediaStore for SqliteMediaStore {
     async fn get_size(&self) -> Result<Option<usize>, Self::Error> {
         self.get_db_size().await
     }
+
+    #[instrument(skip(self))]
+    async fn has_media_content_for_uri(
+        &self,
+        uri: &MxcUri,
+    ) -> Result<bool, Self::Error> {
+        let uri = self.encode_key(keys::MEDIA, uri);
+
+        let conn = self.read().await?;
+
+        let exists: i64 = conn
+            .query_row(
+                "SELECT 1 FROM media WHERE uri = ? LIMIT 1",
+                (uri,),
+                |row| row.get(0),
+            )
+            .await?;
+
+        Ok(exists != 0)
+    }
 }
 
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
