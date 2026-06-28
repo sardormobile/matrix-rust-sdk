@@ -20,10 +20,9 @@ use std::io::Read;
 use std::time::Duration;
 #[cfg(not(target_family = "wasm"))]
 use std::{fmt, fs::File, path::Path};
-
 use eyeball::SharedObservable;
 use futures_util::future::try_join;
-use matrix_sdk_base::media::store::IgnoreMediaRetentionPolicy;
+use matrix_sdk_base::media::store::{IgnoreMediaRetentionPolicy, MediaStoreError};
 pub use matrix_sdk_base::media::{store::MediaRetentionPolicy, *};
 use mime::Mime;
 use ruma::{
@@ -36,11 +35,12 @@ use ruma::{
     assign,
     events::room::{MediaSource, ThumbnailInfo},
 };
+use ruma::api::OutgoingRequest;
 #[cfg(not(target_family = "wasm"))]
 use tempfile::{Builder as TempFileBuilder, NamedTempFile, TempDir};
 #[cfg(not(target_family = "wasm"))]
 use tokio::{fs::File as TokioFile, io::AsyncWriteExt};
-
+use tokio_util::sync::CancellationToken;
 use crate::{
     Client, Error, Result, TransmissionProgress, attachment::Thumbnail,
     client::futures::SendMediaUploadRequest, config::RequestConfig,
@@ -159,8 +159,22 @@ pub enum MediaError {
     /// Fetching the `max_upload_size` value from the homeserver failed.
     #[error("Fetching the `max_upload_size` value from the homeserver failed: {0}")]
     FetchMaxUploadSizeFailed(String),
-}
 
+    /// The media upload or download operation was cancelled before completion.
+    #[error("the media transfer was cancelled")]
+    TransferCancelled,
+}
+// #[derive(Debug)]
+// pub struct DownloadProgress {
+//     pub total: Option<u64>,
+//     pub downloaded: u64,
+//     pub percentage: f32,
+// }
+// pub trait MediaDownloadListener: Send + Sync {
+//     fn on_progress(&self, progress: DownloadProgress);
+//     fn on_complete(&self, path: String);
+//     fn on_error(&self, error: String);
+// }
 impl Media {
     pub(crate) fn new(client: Client) -> Self {
         Self { client }
@@ -404,6 +418,83 @@ impl Media {
 
         Ok(MediaFileHandle { file: temp_file, _directory: temp_dir })
     }
+    #[cfg(not(target_family = "wasm"))]
+    pub async fn get_media_file_with_progress(
+        &self,
+        request: &MediaRequestParameters,
+        filename: Option<String>,
+        content_type: &Mime,
+        use_cache: bool,
+        temp_dir: Option<String>,
+        progress: SharedObservable<TransmissionProgress>,
+        cancellation_token: Option<CancellationToken>
+    ) -> Result<MediaFileHandle> {
+        let data = self.get_progress_media_content(request, use_cache, progress, cancellation_token).await?;
+        
+        let inferred_extension = mime2ext::mime2ext(content_type);
+
+        let filename_as_path = filename.as_ref().map(Path::new);
+
+        let (sanitized_filename, filename_has_extension) = if let Some(path) = filename_as_path {
+            let sanitized_filename = path.file_name().and_then(|f| f.to_str());
+            let filename_has_extension = path.extension().is_some();
+            (sanitized_filename, filename_has_extension)
+        } else {
+            (None, false)
+        };
+
+        let (temp_file, temp_dir) =
+            match (sanitized_filename, filename_has_extension, inferred_extension) {
+                // If the file name has an extension use that
+                (Some(filename_with_extension), true, _) => {
+                    // Use an intermediary directory to avoid conflicts
+                    let temp_dir = temp_dir.map(TempDir::new_in).unwrap_or_else(TempDir::new)?;
+                    let temp_file = TempFileBuilder::new()
+                        .prefix(filename_with_extension)
+                        .rand_bytes(0)
+                        .tempfile_in(&temp_dir)?;
+                    (temp_file, Some(temp_dir))
+                }
+                // If the file name doesn't have an extension try inferring one for it
+                (Some(filename), false, Some(inferred_extension)) => {
+                    // Use an intermediary directory to avoid conflicts
+                    let temp_dir = temp_dir.map(TempDir::new_in).unwrap_or_else(TempDir::new)?;
+                    let temp_file = TempFileBuilder::new()
+                        .prefix(filename)
+                        .suffix(&(".".to_owned() + inferred_extension))
+                        .rand_bytes(0)
+                        .tempfile_in(&temp_dir)?;
+                    (temp_file, Some(temp_dir))
+                }
+                // If the only thing we have is an inferred extension then use that together with a
+                // randomly generated file name
+                (None, _, Some(inferred_extension)) => (
+                    TempFileBuilder::new()
+                        .suffix(&&(".".to_owned() + inferred_extension))
+                        .tempfile()?,
+                    None,
+                ),
+                // Otherwise just use a completely random file name
+                _ => (TempFileBuilder::new().tempfile()?, None),
+            };
+
+        let mut file = TokioFile::from_std(temp_file.reopen()?);
+        file.write_all(&data).await?;
+        // Make sure the file metadata is flushed to disk.
+        file.sync_all().await?;
+
+        // if let Some(callback) = log_callback {
+        //     callback.on_log(
+        //         temp_dir
+        //             .as_ref()
+        //             .map(|d| format!("path: {:?}, size: {}", d.path(), data.len()))
+        //             .unwrap_or_else(|| "***".to_owned()),
+        //     );
+        // }
+
+
+        Ok(MediaFileHandle { file: temp_file, _directory: temp_dir })
+    }
 
     /// Get a media file's content.
     ///
@@ -420,16 +511,75 @@ impl Media {
         request: &MediaRequestParameters,
         use_cache: bool,
     ) -> Result<Vec<u8>> {
-        // Ignore request parameters for local medias, notably those pending in the send
-        // queue.
+        self.get_media_content_inner(
+            request,
+            use_cache,
+            None,
+            None
+        )
+            .await
+    }
+    pub async fn get_progress_media_content(
+        &self,
+        request: &MediaRequestParameters,
+        use_cache: bool,
+        progress: SharedObservable<TransmissionProgress>,
+        cancellation_token: Option<CancellationToken>
+    ) -> Result<Vec<u8>> {
+        self.get_media_content_inner(
+            request,
+            use_cache,
+            Some(progress),
+            cancellation_token
+        )
+            .await
+    }
+    pub async fn has_media_content_for_uri(&self, media_source: &MediaSource) -> bool {
+        // let uri = match Self::as_local_uri(&media_source) {
+        // //     None => {
+        // //         return false;
+        // //     }
+        // //     Some(uri) => uri
+        // // };
+        let uri = match media_source {
+            MediaSource::Plain(uri) => uri,
+            MediaSource::Encrypted(file) => &file.url,
+        };
+        let store_result = self
+            .client
+            .media_store()
+            .lock()
+            .await;
+
+        match store_result {
+            Ok(store) => {
+                store.has_media_content_for_uri(uri).await.unwrap_or(false)
+            }
+            Err(_) => {
+                false
+            }
+        }
+    }
+
+    // Get a media file's content with progress state callback
+    async fn get_media_content_inner(
+        &self,
+        request: &MediaRequestParameters,
+        use_cache: bool,
+        progress: Option<SharedObservable<TransmissionProgress>>,
+        cancel_token: Option<CancellationToken>,
+    ) -> Result<Vec<u8>> {
         if let Some(uri) = Self::as_local_uri(&request.source) {
             return self.get_local_media_content(uri).await;
         }
 
-        // Read from the cache.
-        if use_cache
-            && let Some(content) =
-                self.client.media_store().lock().await?.get_media_content(request).await?
+        if use_cache && let Some(content) = self
+            .client
+            .media_store()
+            .lock()
+            .await?
+            .get_media_content(request)
+            .await?
         {
             return Ok(content);
         }
@@ -437,11 +587,8 @@ impl Media {
         let request_config = self
             .client
             .request_config()
-            // Downloading a file should have no timeout as we don't know the network connectivity
-            // available for the user or the file size
             .timeout(Some(Duration::MAX));
 
-        // Use the authenticated endpoints when the server supports it.
         let supported_versions = self.client.supported_versions().await?;
 
         let use_auth = authenticated_media::get_content::v1::Request::PATH_BUILDER
@@ -452,24 +599,75 @@ impl Media {
                 let content = if use_auth {
                     let request =
                         authenticated_media::get_content::v1::Request::from_uri(&file.url)?;
-                    self.client.send(request).with_request_config(request_config).await?.file
+
+                    let mut send = self
+                        .client
+                        .send(request)
+                        .with_request_config(request_config);
+
+                    if let Some(progress) = progress.clone() {
+                        send = send.with_send_progress_observable(progress);
+                    }
+
+                    match cancel_token {
+                        Some(token) => {
+                            tokio::select! {
+                                result = send => {
+                                    result?.file
+                                }
+
+                                _ = token.cancelled() => {
+                                    return Err(Error::Media(MediaError::TransferCancelled));
+                                }
+                            }
+                        }
+                        None => {
+                            send.await?.file
+                        }
+                    }
                 } else {
                     #[allow(deprecated)]
-                    let request = media::get_content::v3::Request::from_url(&file.url)?;
-                    self.client.send(request).with_request_config(request_config).await?.file
+                    let request =
+                        media::get_content::v3::Request::from_url(&file.url)?;
+
+                    let mut send = self
+                        .client
+                        .send(request)
+                        .with_request_config(request_config);
+
+                    if let Some(progress) = progress.clone() {
+                        send = send.with_send_progress_observable(progress);
+                    }
+
+                    match cancel_token {
+                        Some(token) => {
+                            tokio::select! {
+                                result = send => {
+                                    result?.file
+                                }
+
+                                _ = token.cancelled() => {
+                                    return Err(Error::Media(MediaError::TransferCancelled));
+                                }
+                            }
+                        }
+                        None => {
+                            send.await?.file
+                        }
+                    }
                 };
 
                 #[cfg(feature = "e2e-encryption")]
                 let content = {
                     let content_len = content.len();
+
                     let mut cursor = std::io::Cursor::new(content);
+
                     let mut reader = matrix_sdk_base::crypto::AttachmentDecryptor::new(
                         &mut cursor,
                         file.as_ref().clone().into(),
                     )?;
 
-                    // Encrypted size should be the same as the decrypted size,
-                    // rounded up to a cipher block.
                     let mut decrypted = Vec::with_capacity(content_len);
 
                     reader.read_to_end(&mut decrypted)?;
@@ -489,32 +687,76 @@ impl Media {
                                 settings.width,
                                 settings.height,
                             )?;
+
                         request.method = Some(settings.method.clone());
                         request.animated = Some(settings.animated);
 
-                        self.client.send(request).with_request_config(request_config).await?.file
+                        let mut send = self
+                            .client
+                            .send(request)
+                            .with_request_config(request_config);
+
+                        if let Some(progress) = progress.clone() {
+                            send = send.with_send_progress_observable(progress);
+                        }
+
+                        send.await?.file
                     } else {
                         #[allow(deprecated)]
                         let request = {
-                            let mut request = media::get_content_thumbnail::v3::Request::from_url(
-                                uri,
-                                settings.width,
-                                settings.height,
-                            )?;
+                            let mut request =
+                                media::get_content_thumbnail::v3::Request::from_url(
+                                    uri,
+                                    settings.width,
+                                    settings.height,
+                                )?;
+
                             request.method = Some(settings.method.clone());
                             request.animated = Some(settings.animated);
+
                             request
                         };
 
-                        self.client.send(request).with_request_config(request_config).await?.file
+                        let mut send = self
+                            .client
+                            .send(request)
+                            .with_request_config(request_config);
+
+                        if let Some(progress) = progress.clone() {
+                            send = send.with_send_progress_observable(progress);
+                        }
+
+                        send.await?.file
                     }
                 } else if use_auth {
-                    let request = authenticated_media::get_content::v1::Request::from_uri(uri)?;
-                    self.client.send(request).with_request_config(request_config).await?.file
+                    let request =
+                        authenticated_media::get_content::v1::Request::from_uri(uri)?;
+
+                    let mut send = self
+                        .client
+                        .send(request)
+                        .with_request_config(request_config);
+
+                    if let Some(progress) = progress.clone() {
+                        send = send.with_send_progress_observable(progress);
+                    }
+
+                    send.await?.file
                 } else {
                     #[allow(deprecated)]
-                    let request = media::get_content::v3::Request::from_url(uri)?;
-                    self.client.send(request).with_request_config(request_config).await?.file
+                    let request =
+                        media::get_content::v3::Request::from_url(uri)?;
+
+                    let mut send = self
+                        .client
+                        .send(request)
+                        .with_request_config(request_config);
+
+                    if let Some(progress) = progress.clone() {
+                        send = send.with_send_progress_observable(progress);
+                    }
+
+                    send.await?.file
                 }
             }
         };
@@ -524,7 +766,11 @@ impl Media {
                 .media_store()
                 .lock()
                 .await?
-                .add_media_content(request, content.clone(), IgnoreMediaRetentionPolicy::No)
+                .add_media_content(
+                    request,
+                    content.clone(),
+                    IgnoreMediaRetentionPolicy::No,
+                )
                 .await?;
         }
 
@@ -546,6 +792,7 @@ impl Media {
             .await?
             .ok_or_else(|| MediaError::LocalMediaNotFound.into())
     }
+
 
     /// Remove a media file's content from the store.
     ///

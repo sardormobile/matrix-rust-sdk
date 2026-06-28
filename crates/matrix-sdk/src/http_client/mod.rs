@@ -18,8 +18,8 @@ use std::{
     fmt::Debug,
     num::NonZeroUsize,
     sync::{
-        Arc,
         atomic::{AtomicU64, Ordering},
+        Arc,
     },
     time::Duration,
 };
@@ -27,18 +27,19 @@ use std::{
 use bytes::{Bytes, BytesMut};
 use bytesize::ByteSize;
 use eyeball::SharedObservable;
+use futures_util::StreamExt;
 use http::Method;
 use matrix_sdk_base::SendOutsideWasm;
 use ruma::api::{
-    OutgoingRequest, SupportedVersions,
-    auth_scheme::{self, AuthScheme, SendAccessToken},
-    error::{FromHttpResponseError, IntoHttpError},
+    auth_scheme::{self, AuthScheme, SendAccessToken}, error::{FromHttpResponseError, IntoHttpError},
     path_builder,
+    OutgoingRequest,
+    SupportedVersions,
 };
 use tokio::sync::{Semaphore, SemaphorePermit};
 use tracing::{debug, error, field::debug, instrument, trace};
 
-use crate::{HttpResult, config::RequestConfig, error::HttpError};
+use crate::{config::RequestConfig, error::HttpError, HttpResult};
 
 #[cfg(not(target_family = "wasm"))]
 mod native;
@@ -235,7 +236,6 @@ pub struct TransmissionProgress {
     /// How many bytes there are in total.
     pub total: usize,
 }
-
 async fn response_to_http_response(
     mut response: reqwest::Response,
 ) -> Result<http::Response<Bytes>, reqwest::Error> {
@@ -254,7 +254,72 @@ async fn response_to_http_response(
 
     Ok(http_builder.body(body).expect("Can't construct a response using the given body"))
 }
+async fn media_download_http_response(
+    mut response: reqwest::Response,
+    progress: SharedObservable<TransmissionProgress>,
+) -> Result<http::Response<Bytes>, reqwest::Error> {
+    let status = response.status();
 
+    let mut http_builder = http::Response::builder().status(status);
+
+    let headers = http_builder
+        .headers_mut()
+        .expect("Can't get the response builder headers");
+
+    for (k, v) in response.headers_mut().drain() {
+        if let Some(key) = k {
+            headers.insert(key, v);
+        }
+    }
+
+    let total = response.content_length().unwrap_or(0) as usize;
+
+    progress.update(|p| {
+        p.current = 0;
+        p.total = total;
+    });
+
+    let mut downloaded = 0usize;
+    let mut last_reported = 0usize;
+
+    const PROGRESS_UPDATE_STEP: usize = 64 * 1024;
+
+    let mut body = if total > 0 {
+        BytesMut::with_capacity(total.min(16 * 1024 * 1024))
+    } else {
+        BytesMut::new()
+    };
+
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+
+        downloaded += chunk.len();
+
+        (&mut body).extend_from_slice(&chunk);
+
+        if downloaded - last_reported >= PROGRESS_UPDATE_STEP {
+            last_reported = downloaded;
+
+            progress.update(|p| {
+                p.current = downloaded;
+                p.total = total;
+            });
+        }
+    }
+
+    progress.update(|p| {
+        p.current = downloaded;
+        p.total = total;
+    });
+
+    Ok(
+        http_builder
+            .body(body.freeze())
+            .expect("Can't construct a response using the given body"),
+    )
+}
 /// Marker trait to identify the authentication schemes that the
 /// [`Client`](crate::Client) supports.
 ///
@@ -363,8 +428,8 @@ mod tests {
     use std::{
         num::NonZeroUsize,
         sync::{
-            Arc,
             atomic::{AtomicU8, Ordering},
+            Arc,
         },
         time::Duration,
     };
@@ -372,8 +437,8 @@ mod tests {
     use matrix_sdk_common::executor::spawn;
     use matrix_sdk_test::{async_test, test_json};
     use wiremock::{
-        Mock, Request, ResponseTemplate,
-        matchers::{method, path},
+        matchers::{method, path}, Mock, Request,
+        ResponseTemplate,
     };
 
     use crate::{

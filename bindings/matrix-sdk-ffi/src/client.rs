@@ -12,6 +12,7 @@
 // See the License for that specific language governing permissions and
 // limitations under the License.
 
+use eyeball::SharedObservable;
 use std::{
     collections::HashMap,
     fmt::Debug,
@@ -72,52 +73,47 @@ use matrix_sdk_ui::{
 };
 use mime::Mime;
 use oauth2::Scope;
-use ruma::{
-    OwnedDeviceId, OwnedMxcUri, OwnedServerName, RoomAliasId, RoomOrAliasId, ServerName,
-    api::{
-        client::{
-            alias::get_alias,
-            discovery::get_authorization_server_metadata::v1::{
-                AccountManagementActionData, DeviceDeleteData, DeviceViewData,
-            },
-            profile::{AvatarUrl, DisplayName},
-            room::create_room::{RoomPowerLevelsContentOverride, v3::CreationContent},
-            uiaa::{EmailUserIdentifier, UserIdentifier},
+use ruma::{OwnedDeviceId, OwnedMxcUri, OwnedServerName, RoomAliasId, RoomOrAliasId, ServerName, api::{
+    client::{
+        alias::get_alias,
+        discovery::get_authorization_server_metadata::v1::{
+            AccountManagementActionData, DeviceDeleteData, DeviceViewData,
         },
-        error::ErrorKind,
+        profile::{AvatarUrl, DisplayName},
+        room::create_room::{RoomPowerLevelsContentOverride, v3::CreationContent},
+        uiaa::{EmailUserIdentifier, UserIdentifier},
     },
-    events::{
-        AnyMessageLikeEventContent, AnySyncTimelineEvent,
-        GlobalAccountDataEvent as RumaGlobalAccountDataEvent,
-        RoomAccountDataEvent as RumaRoomAccountDataEvent,
-        direct::DirectEventContent,
-        fully_read::FullyReadEventContent,
-        identity_server::IdentityServerEventContent,
-        ignored_user_list::IgnoredUserListEventContent,
-        key::verification::request::ToDeviceKeyVerificationRequestEvent,
-        marked_unread::{MarkedUnreadEventContent, UnstableMarkedUnreadEventContent},
-        push_rules::PushRulesEventContent,
-        room::{
-            history_visibility::RoomHistoryVisibilityEventContent,
-            join_rules::{
-                AllowRule as RumaAllowRule, JoinRule as RumaJoinRule, RoomJoinRulesEventContent,
-            },
-            message::{OriginalSyncRoomMessageEvent, Relation},
+    error::ErrorKind,
+}, events::{
+    AnyMessageLikeEventContent, AnySyncTimelineEvent,
+    GlobalAccountDataEvent as RumaGlobalAccountDataEvent,
+    RoomAccountDataEvent as RumaRoomAccountDataEvent,
+    direct::DirectEventContent,
+    fully_read::FullyReadEventContent,
+    identity_server::IdentityServerEventContent,
+    ignored_user_list::IgnoredUserListEventContent,
+    key::verification::request::ToDeviceKeyVerificationRequestEvent,
+    marked_unread::{MarkedUnreadEventContent, UnstableMarkedUnreadEventContent},
+    push_rules::PushRulesEventContent,
+    room::{
+        history_visibility::RoomHistoryVisibilityEventContent,
+        join_rules::{
+            AllowRule as RumaAllowRule, JoinRule as RumaJoinRule, RoomJoinRulesEventContent,
         },
-        secret_storage::{
-            default_key::SecretStorageDefaultKeyEventContent, key::SecretStorageKeyEventContent,
-        },
-        tag::TagEventContent,
+        message::{OriginalSyncRoomMessageEvent, Relation},
     },
-    push::{HttpPusherData as RumaHttpPusherData, PushFormat as RumaPushFormat},
-    room::RoomType,
-};
+    secret_storage::{
+        default_key::SecretStorageDefaultKeyEventContent, key::SecretStorageKeyEventContent,
+    },
+    tag::TagEventContent,
+}, push::{HttpPusherData as RumaHttpPusherData, PushFormat as RumaPushFormat}, room::RoomType, MxcUri};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 use url::Url;
-
+use matrix_sdk::media_transfer::MediaTransferManager::{MediaTransferManager, TransferHandle};
 use super::{
     room::{Room, room_info::RoomInfo},
     session_verification::SessionVerificationController,
@@ -151,6 +147,7 @@ use crate::{
     utd::{UnableToDecryptDelegate, UtdHook},
     utils::AsyncRuntimeDropped,
 };
+use crate::ruma::MediaSourceExt;
 
 #[derive(Clone, uniffi::Record)]
 pub struct PusherIdentifiers {
@@ -239,7 +236,42 @@ pub trait ClientSessionDelegate: SyncOutsideWasm + SendOutsideWasm {
 pub trait ProgressWatcher: SyncOutsideWasm + SendOutsideWasm {
     fn transmission_progress(&self, progress: TransmissionProgress);
 }
-
+#[matrix_sdk_ffi_macros::export(callback_interface)]
+pub trait MediaFileProgressWatcher: SyncOutsideWasm + SendOutsideWasm {
+    fn transmission_progress(&self, progress: MediaFileTransferProgress);
+}
+#[derive(uniffi::Enum, Clone)]
+pub enum MediaFileTransferProgress {
+    Progress {
+        current: u64,
+        total: u64,
+    },
+    Finished,
+    Cancelled,
+    Failed {
+        error: String,
+    },
+}
+impl MediaFileTransferProgress {
+    pub fn progress(
+        current: usize,
+        total: usize,
+    ) -> Self {
+        Self::Progress {
+            current: current.try_into().unwrap_or(u64::MAX),
+            total: total.try_into().unwrap_or(u64::MAX),
+        }
+    }
+    pub fn finished() -> Self {
+        Self::Finished
+    }
+    pub fn cancelled() -> Self {
+        Self::Cancelled
+    }
+    pub fn failed(error: impl Into<String>) -> Self {
+        Self::Failed { error: error.into() }
+    }
+}
 /// A listener to the global (client-wide) update reporter of the send queue.
 #[matrix_sdk_ffi_macros::export(callback_interface)]
 pub trait SendQueueRoomUpdateListener: SyncOutsideWasm + SendOutsideWasm {
@@ -374,6 +406,7 @@ pub struct Client {
     /// SQLite or IndexedDB).
     #[cfg_attr(not(feature = "sqlite"), allow(unused))]
     store_path: Option<PathBuf>,
+    media_transfer_manager: Arc<MediaTransferManager>
 }
 
 impl Client {
@@ -418,6 +451,7 @@ impl Client {
             utd_hook_manager: OnceLock::new(),
             session_verification_controller,
             store_path,
+            media_transfer_manager: Arc::new(MediaTransferManager::new())
         };
 
         match store_mode {
@@ -1129,6 +1163,135 @@ impl Client {
         })
     }
 
+    pub async fn get_media_file_with_progress(
+        &self,
+        media_source: Arc<MediaSource>,
+        filename: Option<String>,
+        mime_type: String,
+        use_cache: bool,
+        temp_dir: Option<String>,
+        progress_watcher: Box<dyn MediaFileProgressWatcher>,
+    ) -> Result<Arc<MediaFileHandle>, ClientError> {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let source = (*media_source).clone();
+            let mime_type: mime::Mime = mime_type.parse()?;
+
+            let progress = SharedObservable::new(matrix_sdk::TransmissionProgress::default());
+
+            let mut subscriber = progress.subscribe();
+
+            let watcher: Arc<dyn MediaFileProgressWatcher> = Arc::from(progress_watcher);
+            let watcher_for_task = watcher.clone();
+
+            let transfer_id = source.media_source.url();
+
+            let cancel_token = self.media_transfer_manager
+                .start_transfer(transfer_id.clone());
+
+            let cancel_token_for_task = cancel_token.clone();
+
+            let join_handler = get_runtime_handle().spawn(async move {
+                let mut last_percent = usize::MAX;
+
+                loop {
+                    tokio::select! {
+                        _ = cancel_token_for_task.cancelled() => {
+                            watcher_for_task.transmission_progress(
+                                MediaFileTransferProgress::cancelled()
+                            );
+                            break;
+                        }
+
+                        Some(update) = subscriber.next() => {
+                            if update.total == 0 {
+                                continue;
+                            }
+
+                            let percent =
+                                update.current.saturating_mul(100) / update.total;
+
+                            if percent == last_percent && update.current < update.total
+                            {
+                                continue;
+                            }
+
+                            last_percent = percent;
+
+                            watcher_for_task.transmission_progress(
+                                MediaFileTransferProgress::progress(
+                                    update.current,
+                                    update.total
+                                )
+                            );
+
+                            if update.current >= update.total {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+
+            let result = self
+                .inner
+                .media()
+                .get_media_file_with_progress(
+                    &MediaRequestParameters {
+                        source: source.media_source,
+                        format: MediaFormat::File,
+                    },
+                    filename,
+                    &mime_type,
+                    use_cache,
+                    temp_dir,
+                    progress,
+                    Some(cancel_token)
+                )
+                .await;
+
+            join_handler.abort();
+
+            match result {
+                Ok(handle) => {
+                    watcher.transmission_progress(
+                        MediaFileTransferProgress::finished()
+                    );
+                    self.media_transfer_manager
+                        .finish_transfer(&transfer_id);
+
+                    Ok(Arc::new(MediaFileHandle::new(handle)))
+                }
+                Err(error) => {
+                    self.media_transfer_manager
+                        .finish_transfer(&transfer_id);
+
+                    watcher.transmission_progress(
+                        MediaFileTransferProgress::failed(error.to_string())
+                    );
+
+                    Err(error.into())
+                }
+            }
+        }
+    }
+    pub async fn has_media_content(&self, media_source: Arc<MediaSource>) -> bool  {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let source = media_source.as_ref();
+            self.inner
+                .media()
+                .has_media_content_for_uri(&source.media_source)
+                .await
+        }
+    }
+    pub fn cancel_media_file_progress(
+        &self,
+        media_source: Arc<MediaSource>,
+    ) {
+        let transfer_id = media_source.media_source.url();
+        self.media_transfer_manager.cancel_transfer(&transfer_id);
+    }
     pub async fn set_display_name(&self, name: String) -> Result<(), ClientError> {
         #[cfg(not(target_family = "wasm"))]
         {
@@ -1406,6 +1569,60 @@ impl Client {
             .get_media_content(&MediaRequestParameters { source, format: MediaFormat::File }, true)
             .await?)
     }
+    // pub async fn get_media_content_with_progress(
+    //     &self,
+    //     media_source: Arc<MediaSource>,
+    //     progress_watcher: Option<Box<dyn ProgressWatcher>>,
+    // ) -> Result<Vec<u8>, ClientError> {
+    //     let source = (*media_source).clone().media_source;
+    //
+    //     let progress = SharedObservable::new(
+    //         matrix_sdk::TransmissionProgress::default(),
+    //     );
+    //
+    //     if let Some(progress_watcher) = progress_watcher {
+    //         let mut subscriber = progress.subscribe();
+    //
+    //         get_runtime_handle().spawn(async move {
+    //             let mut last_percent = usize::MAX;
+    //
+    //             while let Some(update) = subscriber.next().await {
+    //                 if update.total == 0 {
+    //                     continue;
+    //                 }
+    //
+    //                 let percent =
+    //                     update.current.saturating_mul(100) / update.total;
+    //
+    //                 if percent == last_percent && update.current < update.total {
+    //                     continue;
+    //                 }
+    //
+    //                 last_percent = percent;
+    //
+    //                 progress_watcher.transmission_progress(update.into());
+    //
+    //                 if update.current >= update.total {
+    //                     break;
+    //                 }
+    //             }
+    //         });
+    //     }
+    //
+    //     Ok(
+    //         self.inner
+    //             .media()
+    //             .get_progress_media_content(
+    //                 &MediaRequestParameters {
+    //                     source,
+    //                     format: MediaFormat::File,
+    //                 },
+    //                 true,
+    //                 progress,
+    //             )
+    //             .await?,
+    //     )
+    // }
 
     pub async fn get_media_thumbnail(
         &self,

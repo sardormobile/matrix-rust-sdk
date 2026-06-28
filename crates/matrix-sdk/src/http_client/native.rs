@@ -38,7 +38,7 @@ use rustls::{RootCertStore, client::WebPkiServerVerifier};
 use rustls_pki_types::CertificateDer;
 use tracing::{debug, info, warn};
 
-use super::{DEFAULT_REQUEST_TIMEOUT, HttpClient, TransmissionProgress, response_to_http_response};
+use super::{DEFAULT_REQUEST_TIMEOUT, HttpClient, TransmissionProgress, response_to_http_response, media_download_http_response};
 use crate::{
     config::RequestConfig,
     error::{HttpError, RetryKind},
@@ -277,62 +277,89 @@ impl HttpSettings {
     }
 }
 
+// pub(super) async fn send_request_old(
+//     client: &reqwest::Client,
+//     request: &http::Request<Bytes>,
+//     timeout: Option<Duration>,
+//     send_progress: SharedObservable<TransmissionProgress>,
+// ) -> Result<http::Response<Bytes>, HttpError> {
+//     use std::convert::Infallible;
+// 
+//     use futures_util::stream;
+// 
+//     let request = request.clone();
+//     let request = {
+//         let mut request = if send_progress.subscriber_count() != 0 {
+//             let content_length = request.body().len();
+//             send_progress.update(|p| p.total += content_length);
+//             let send_progress = send_progress.clone();
+//             // Make sure any concurrent futures in the same task get a chance
+//             // to also add to the progress total before the first chunks are
+//             // pulled out of the body stream.
+//             tokio::task::yield_now().await;
+//             let mut req = reqwest::Request::try_from(request.map(|body| {
+//                 let chunks = stream::iter(BytesChunks::new(body, 8192).map(
+//                     move |chunk| -> Result<_, Infallible> {
+//                         send_progress.update(|p| p.current += chunk.len());
+//                         Ok(chunk)
+//                     },
+//                 ));
+//                 reqwest::Body::wrap_stream(chunks)
+//             }))?;
+// 
+//             // When streaming the request, reqwest / hyper doesn't know how
+//             // large the body is, so it doesn't set the content-length header
+//             // (required by some servers). Set it manually.
+//             req.headers_mut().insert(CONTENT_LENGTH, content_length.into());
+// 
+//             req
+//         } else {
+//             reqwest::Request::try_from(request)?
+//         };
+// 
+//         *request.timeout_mut() = timeout;
+//         request
+//     };
+// 
+//     let response = client.execute(request).await?;
+//     Ok(response_to_http_response(response).await?)
+// }
 pub(super) async fn send_request(
     client: &reqwest::Client,
     request: &http::Request<Bytes>,
     timeout: Option<Duration>,
     send_progress: SharedObservable<TransmissionProgress>,
 ) -> Result<http::Response<Bytes>, HttpError> {
-    use std::convert::Infallible;
-
-    use futures_util::stream;
 
     let request = request.clone();
     let request = {
-        let mut request = if send_progress.subscriber_count() != 0 {
-            let content_length = request.body().len();
-            send_progress.update(|p| p.total += content_length);
-
-            // Make sure any concurrent futures in the same task get a chance
-            // to also add to the progress total before the first chunks are
-            // pulled out of the body stream.
-            tokio::task::yield_now().await;
-
-            let mut req = reqwest::Request::try_from(request.map(|body| {
-                let chunks = stream::iter(BytesChunks::new(body, 8192).map(
-                    move |chunk| -> Result<_, Infallible> {
-                        send_progress.update(|p| p.current += chunk.len());
-                        Ok(chunk)
-                    },
-                ));
-                reqwest::Body::wrap_stream(chunks)
-            }))?;
-
-            // When streaming the request, reqwest / hyper doesn't know how
-            // large the body is, so it doesn't set the content-length header
-            // (required by some servers). Set it manually.
-            req.headers_mut().insert(CONTENT_LENGTH, content_length.into());
-
-            req
-        } else {
-            reqwest::Request::try_from(request)?
-        };
-
+        let mut request =   reqwest::Request::try_from(request)?;
         *request.timeout_mut() = timeout;
         request
     };
 
+    let method = request.method().clone();
+
     let response = client.execute(request).await?;
-    Ok(response_to_http_response(response).await?)
+
+    match method {
+        http::Method::GET => {
+            Ok(media_download_http_response(response, send_progress).await?)
+        }
+
+        _ => {
+            Ok(response_to_http_response(response).await?)
+        }
+    }
 }
 
-struct BytesChunks {
+pub struct BytesChunks {
     bytes: Bytes,
     size: usize,
 }
 
 impl BytesChunks {
-    fn new(bytes: Bytes, size: usize) -> Self {
+   pub fn new(bytes: Bytes, size: usize) -> Self {
         assert_ne!(size, 0);
         Self { bytes, size }
     }

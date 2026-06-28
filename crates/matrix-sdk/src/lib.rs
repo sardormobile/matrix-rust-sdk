@@ -22,12 +22,12 @@
 pub use async_trait::async_trait;
 pub use bytes;
 pub use matrix_sdk_base::{
-    CallIntentConsensus, ComposerDraft, ComposerDraftType, DraftAttachment, DraftAttachmentContent,
-    DraftThumbnail, EncryptionState, PredecessorRoom, QueueWedgeError, Room as BaseRoom,
-    RoomCreateWithCreatorEventContent, RoomDisplayName, RoomHero, RoomInfo,
-    RoomMember as BaseRoomMember, RoomMemberships, RoomRecencyStamp, RoomState, SessionMeta,
-    StateChanges, StateStore, StoreError, SuccessorRoom, ThreadingSupport, deserialized_responses,
-    store::{self, DynStateStore, MemoryStore, StateStoreExt},
+    deserialized_responses, store::{self, DynStateStore, MemoryStore, StateStoreExt}, CallIntentConsensus, ComposerDraft, ComposerDraftType,
+    DraftAttachment, DraftAttachmentContent, DraftThumbnail, EncryptionState, PredecessorRoom,
+    QueueWedgeError, Room as BaseRoom, RoomCreateWithCreatorEventContent, RoomDisplayName,
+    RoomHero, RoomInfo, RoomMember as BaseRoomMember, RoomMemberships, RoomRecencyStamp,
+    RoomState, SessionMeta, StateChanges, StateStore, StoreError, SuccessorRoom,
+    ThreadingSupport,
 };
 pub use matrix_sdk_common::*;
 pub use reqwest;
@@ -73,8 +73,8 @@ pub use client::homeserver_capabilities::HomeserverCapabilities;
 #[cfg(feature = "experimental-search")]
 pub mod search_index;
 pub use client::{
-    Client, ClientBuildError, ClientBuilder, LoopCtrl, ServerVendorInfo, SessionChange, StoreSizes,
-    TileServerInfo, sanitize_server_name,
+    sanitize_server_name, Client, ClientBuildError, ClientBuilder, LoopCtrl, ServerVendorInfo, SessionChange,
+    StoreSizes, TileServerInfo,
 };
 pub use error::{
     BeaconError, Error, HttpError, HttpResult, NotificationSettingsError, RefreshTokenError,
@@ -85,8 +85,8 @@ pub use http_client::TransmissionProgress;
 pub use matrix_sdk_sqlite::SqliteCryptoStore;
 #[cfg(feature = "sqlite")]
 pub use matrix_sdk_sqlite::{
-    STATE_STORE_DATABASE_NAME, SqliteEventCacheStore, SqliteMediaStore, SqliteStateStore,
-    SqliteStoreConfig,
+    SqliteEventCacheStore, SqliteMediaStore, SqliteStateStore, SqliteStoreConfig,
+    STATE_STORE_DATABASE_NAME,
 };
 pub use media::Media;
 pub use pusher::Pusher;
@@ -103,6 +103,7 @@ uniffi::setup_scaffolding!();
 pub mod live_locations_observer;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_utils;
+pub mod media_transfer;
 
 #[cfg(test)]
 matrix_sdk_test_utils::init_tracing_for_tests!();
