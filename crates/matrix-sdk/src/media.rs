@@ -22,7 +22,7 @@ use std::time::Duration;
 use std::{fmt, fs::File, path::Path};
 use eyeball::SharedObservable;
 use futures_util::future::try_join;
-use matrix_sdk_base::media::store::{IgnoreMediaRetentionPolicy};
+use matrix_sdk_base::media::store::IgnoreMediaRetentionPolicy;
 pub use matrix_sdk_base::media::{store::MediaRetentionPolicy, *};
 use mime::Mime;
 use ruma::{
@@ -35,7 +35,6 @@ use ruma::{
     assign,
     events::room::{MediaSource, ThumbnailInfo},
 };
-use ruma::api::OutgoingRequest;
 #[cfg(not(target_family = "wasm"))]
 use tempfile::{Builder as TempFileBuilder, NamedTempFile, TempDir};
 #[cfg(not(target_family = "wasm"))]
@@ -418,6 +417,11 @@ impl Media {
 
         Ok(MediaFileHandle { file: temp_file, _directory: temp_dir })
     }
+    /// Downloads a media file and reports incremental download progress.
+    ///
+    /// The provided progress callback is invoked as chunks are received.
+    /// If `cancellation_token` is cancelled, the download is aborted and
+    /// any partially downloaded data is discarded.
     #[cfg(not(target_family = "wasm"))]
     pub async fn get_media_file_with_progress(
         &self,
@@ -519,6 +523,11 @@ impl Media {
         )
             .await
     }
+    /// Downloads the media content while reporting download progress.
+    ///
+    /// If `use_cache` is `true`, cached media is returned when available.
+    /// Progress updates are emitted through the provided observable.
+    /// The download can be cancelled using the optional cancellation token.
     pub async fn get_progress_media_content(
         &self,
         request: &MediaRequestParameters,
@@ -534,13 +543,9 @@ impl Media {
         )
             .await
     }
+    /// Checks whether the media content identified by the given media source
+    /// is already stored in the local media cache.
     pub async fn has_media_content_for_uri(&self, media_source: &MediaSource) -> bool {
-        // let uri = match Self::as_local_uri(&media_source) {
-        // //     None => {
-        // //         return false;
-        // //     }
-        // //     Some(uri) => uri
-        // // };
         let uri = match media_source {
             MediaSource::Plain(uri) => uri,
             MediaSource::Encrypted(file) => &file.url,

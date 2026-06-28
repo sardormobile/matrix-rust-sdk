@@ -103,6 +103,7 @@ uniffi::setup_scaffolding!();
 pub mod live_locations_observer;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_utils;
+/// Types for managing media transfers and their lifecycle.
 pub mod media_transfer;
 
 #[cfg(test)]

@@ -106,14 +106,13 @@ use ruma::{OwnedDeviceId, OwnedMxcUri, OwnedServerName, RoomAliasId, RoomOrAlias
         default_key::SecretStorageDefaultKeyEventContent, key::SecretStorageKeyEventContent,
     },
     tag::TagEventContent,
-}, push::{HttpPusherData as RumaHttpPusherData, PushFormat as RumaPushFormat}, room::RoomType, MxcUri};
+}, push::{HttpPusherData as RumaHttpPusherData, PushFormat as RumaPushFormat}, room::RoomType};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 use url::Url;
-use matrix_sdk::media_transfer::MediaTransferManager::{MediaTransferManager, TransferHandle};
+use matrix_sdk::media_transfer::media_transfer_manager::MediaTransferManager;
 use super::{
     room::{Room, room_info::RoomInfo},
     session_verification::SessionVerificationController,
