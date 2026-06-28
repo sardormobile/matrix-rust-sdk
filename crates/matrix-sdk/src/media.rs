@@ -705,7 +705,22 @@ impl Media {
                             send = send.with_send_progress_observable(progress);
                         }
 
-                        send.await?.file
+                        match cancel_token {
+                            Some(token) => {
+                                tokio::select! {
+                                result = send => {
+                                    result?.file
+                                }
+
+                                _ = token.cancelled() => {
+                                    return Err(Error::Media(MediaError::TransferCancelled));
+                                }
+                            }
+                            }
+                            None => {
+                                send.await?.file
+                            }
+                        }
                     } else {
                         #[allow(deprecated)]
                         let request = {
@@ -731,7 +746,22 @@ impl Media {
                             send = send.with_send_progress_observable(progress);
                         }
 
-                        send.await?.file
+                        match cancel_token {
+                            Some(token) => {
+                                tokio::select! {
+                                result = send => {
+                                    result?.file
+                                }
+
+                                _ = token.cancelled() => {
+                                    return Err(Error::Media(MediaError::TransferCancelled));
+                                }
+                            }
+                            }
+                            None => {
+                                send.await?.file
+                            }
+                        }
                     }
                 } else if use_auth {
                     let request =
@@ -746,7 +776,22 @@ impl Media {
                         send = send.with_send_progress_observable(progress);
                     }
 
-                    send.await?.file
+                    match cancel_token {
+                        Some(token) => {
+                            tokio::select! {
+                                result = send => {
+                                    result?.file
+                                }
+
+                                _ = token.cancelled() => {
+                                    return Err(Error::Media(MediaError::TransferCancelled));
+                                }
+                            }
+                        }
+                        None => {
+                            send.await?.file
+                        }
+                    }
                 } else {
                     #[allow(deprecated)]
                     let request =
@@ -761,7 +806,22 @@ impl Media {
                         send = send.with_send_progress_observable(progress);
                     }
 
-                    send.await?.file
+                    match cancel_token {
+                        Some(token) => {
+                            tokio::select! {
+                                result = send => {
+                                    result?.file
+                                }
+
+                                _ = token.cancelled() => {
+                                    return Err(Error::Media(MediaError::TransferCancelled));
+                                }
+                            }
+                        }
+                        None => {
+                            send.await?.file
+                        }
+                    }
                 }
             }
         };
