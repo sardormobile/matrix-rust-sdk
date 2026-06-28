@@ -22,7 +22,7 @@ use std::time::Duration;
 use std::{fmt, fs::File, path::Path};
 use eyeball::SharedObservable;
 use futures_util::future::try_join;
-use matrix_sdk_base::media::store::{IgnoreMediaRetentionPolicy, MediaStoreError};
+use matrix_sdk_base::media::store::{IgnoreMediaRetentionPolicy};
 pub use matrix_sdk_base::media::{store::MediaRetentionPolicy, *};
 use mime::Mime;
 use ruma::{

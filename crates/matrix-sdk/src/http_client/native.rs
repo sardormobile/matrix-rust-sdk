@@ -25,7 +25,6 @@ use backon::{ExponentialBuilder, Retryable};
 use bytes::Bytes;
 use bytesize::ByteSize;
 use eyeball::SharedObservable;
-use http::header::CONTENT_LENGTH;
 #[cfg(not(target_family = "wasm"))]
 use reqwest::Certificate;
 #[cfg(target_os = "android")]
@@ -284,9 +283,9 @@ impl HttpSettings {
 //     send_progress: SharedObservable<TransmissionProgress>,
 // ) -> Result<http::Response<Bytes>, HttpError> {
 //     use std::convert::Infallible;
-// 
+//
 //     use futures_util::stream;
-// 
+//
 //     let request = request.clone();
 //     let request = {
 //         let mut request = if send_progress.subscriber_count() != 0 {
@@ -306,21 +305,21 @@ impl HttpSettings {
 //                 ));
 //                 reqwest::Body::wrap_stream(chunks)
 //             }))?;
-// 
+//
 //             // When streaming the request, reqwest / hyper doesn't know how
 //             // large the body is, so it doesn't set the content-length header
 //             // (required by some servers). Set it manually.
 //             req.headers_mut().insert(CONTENT_LENGTH, content_length.into());
-// 
+//
 //             req
 //         } else {
 //             reqwest::Request::try_from(request)?
 //         };
-// 
+//
 //         *request.timeout_mut() = timeout;
 //         request
 //     };
-// 
+//
 //     let response = client.execute(request).await?;
 //     Ok(response_to_http_response(response).await?)
 // }
