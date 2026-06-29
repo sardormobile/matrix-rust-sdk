@@ -12,6 +12,15 @@ pub struct MediaTransferManager {
     /// Active media transfers keyed by their unique transfer identifier.
     pub transfers: DashMap<String, TransferHandle>
 }
+/// Result of starting a media transfer.
+#[derive(Debug)]
+pub enum StartTransferResult {
+    /// Transfer started successfully.
+    Started(CancellationToken),
+
+    /// Transfer is already in progress.
+    AlreadyRunning,
+}
 impl MediaTransferManager {
     /// Creates a new, empty media transfer manager.
     pub fn new() -> Self {
@@ -26,17 +35,22 @@ impl MediaTransferManager {
     pub fn start_transfer(
         &self,
         transfer_id: String,
-    ) -> CancellationToken {
-        let token = CancellationToken::new();
+    ) -> StartTransferResult {
+        use dashmap::mapref::entry::Entry;
 
-        self.transfers.insert(
-            transfer_id,
-            TransferHandle {
-                cancel_token: token.clone(),
-            },
-        );
+        match self.transfers.entry(transfer_id) {
+            Entry::Occupied(_) => StartTransferResult::AlreadyRunning,
 
-        token
+            Entry::Vacant(entry) => {
+                let token = CancellationToken::new();
+
+                entry.insert(TransferHandle {
+                    cancel_token: token.clone(),
+                });
+
+                StartTransferResult::Started(token)
+            }
+        }
     }
     /// Cancels the transfer with the given identifier and removes it from
     /// the active transfer registry.

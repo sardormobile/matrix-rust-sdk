@@ -112,7 +112,7 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, error, warn};
 use url::Url;
-use matrix_sdk::media_transfer::media_transfer_manager::MediaTransferManager;
+use matrix_sdk::media_transfer::media_transfer_manager::{MediaTransferManager, StartTransferResult};
 use super::{
     room::{Room, room_info::RoomInfo},
     session_verification::SessionVerificationController,
@@ -245,7 +245,7 @@ pub enum MediaFileTransferProgress {
         current: u64,
         total: u64,
     },
-    Finished,
+    Success,
     Cancelled,
     Failed {
         error: String,
@@ -261,8 +261,8 @@ impl MediaFileTransferProgress {
             total: total.try_into().unwrap_or(u64::MAX),
         }
     }
-    pub fn finished() -> Self {
-        Self::Finished
+    pub fn success() -> Self {
+        Self::Success
     }
     pub fn cancelled() -> Self {
         Self::Cancelled
@@ -1185,8 +1185,18 @@ impl Client {
 
             let transfer_id = source.media_source.url();
 
-            let cancel_token = self.media_transfer_manager
+            let cancel_token_result = self.media_transfer_manager
                 .start_transfer(transfer_id.clone());
+
+            let cancel_token = match cancel_token_result {
+                StartTransferResult::Started(token) => token,
+                StartTransferResult::AlreadyRunning => {
+                    return Err(ClientError::Generic {
+                        msg: "Media transfer already running".to_owned(),
+                        details: None
+                    });
+                }
+            };
 
             let cancel_token_for_task = cancel_token.clone();
 
@@ -1254,7 +1264,7 @@ impl Client {
             match result {
                 Ok(handle) => {
                     watcher.transmission_progress(
-                        MediaFileTransferProgress::finished()
+                        MediaFileTransferProgress::success()
                     );
                     self.media_transfer_manager
                         .finish_transfer(&transfer_id);
